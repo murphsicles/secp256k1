@@ -1,0 +1,10 @@
+[package]
+name = "@crypto/secp256k1"
+version = "0.31.1"
+edition = "2026"
+authors = ["The Zeta Foundation <team@z-lang.org>"]
+description = "Elliptic curve secp256k1 for Zeta — ECDSA signing, verification, key generation, public key recovery for BSV"
+license = "MIT"
+repository = "https://github.com/murphsicles/secp256k1"
+keywords = ["secp256k1", "ecdsa", "bitcoin", "crypto", "bsv", "elliptic-curve"]
+categories = ["cryptography::elliptic-curve"]

@@ -1,0 +1,371 @@
+// @crypto/secp256k1 — Elliptic curve secp256k1 for Zeta
+// Ported from Rust crate rust-secp256k1 v0.31.1
+// License: MIT
+// Repository: https://github.com/murphsicles/secp256k1
+//
+// ECDSA signing, verification, and key generation on the secp256k1 curve.
+// Wraps the Zeta runtime's cryptographic primitives.
+//
+// The secp256k1 curve is defined by: y² = x³ + 7  (Bitcoin/BSV standard)
+
+use std.crypto;
+
+// ─── Key Types ─────────────────────────────────────────────────────────────
+
+/// A secp256k1 public key in compressed 33-byte format (0x02/0x03 + X coord).
+///
+/// The first byte indicates the sign of Y (0x02 = even, 0x03 = odd),
+/// followed by the 32-byte X coordinate.
+pub struct PublicKey {
+    bytes: [u8; 33],
+}
+
+impl PublicKey {
+    /// Create a PublicKey from raw 33 compressed bytes.
+    pub fn from_bytes(bytes: [u8; 33]) -> Result<PublicKey, SecpError> {
+        if bytes[0] != 0x02 && bytes[0] != 0x03 {
+            return Result::Err(SecpError::InvalidPublicKey);
+        }
+        return Result::Ok(PublicKey { bytes: bytes });
+    }
+
+    /// Create a PublicKey from a 65-byte uncompressed public key.
+    /// The uncompressed format is: 0x04 + X(32) + Y(32).
+    pub fn from_uncompressed(bytes: [u8; 65]) -> Result<PublicKey, SecpError> {
+        if bytes[0] != 0x04 {
+            return Result::Err(SecpError::InvalidPublicKey);
+        }
+        let compressed = crypto::secp256k1_compress(bytes);
+        return Result::Ok(PublicKey { bytes: compressed });
+    }
+
+    /// Serialize to compressed 33-byte format.
+    pub fn serialize(&self) -> [u8; 33] {
+        return self.bytes;
+    }
+
+    /// Serialize to uncompressed 65-byte format.
+    pub fn serialize_uncompressed(&self) -> [u8; 65] {
+        return crypto::secp256k1_decompress(self.bytes);
+    }
+
+    /// Return the X coordinate as 32 bytes.
+    pub fn x_coord(&self) -> [u8; 32] {
+        let mut x: [u8; 32];
+        let mut i: usize = 0;
+        while i < 32 {
+            x[i] = self.bytes[i + 1];
+            i += 1;
+        }
+        return x;
+    }
+
+    /// Return the parity of Y (0x02 = even, 0x03 = odd).
+    pub fn y_parity(&self) -> u8 {
+        return self.bytes[0];
+    }
+}
+
+/// A secp256k1 secret key (32 bytes).
+///
+/// Must be a non-zero scalar less than the curve order n.
+pub struct SecretKey {
+    bytes: [u8; 32],
+}
+
+impl SecretKey {
+    /// Create a SecretKey from 32 raw bytes.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<SecretKey, SecpError> {
+        // Check for zero key
+        let mut all_zero = true;
+        let mut i: usize = 0;
+        while i < 32 {
+            if bytes[i] != 0 {
+                all_zero = false;
+                break;
+            }
+            i += 1;
+        }
+        if all_zero {
+            return Result::Err(SecpError::InvalidSecretKey);
+        }
+        // Check that key is less than curve order n
+        if !crypto::secp256k1_scalar_valid(bytes) {
+            return Result::Err(SecpError::InvalidSecretKey);
+        }
+        return Result::Ok(SecretKey { bytes: bytes });
+    }
+
+    /// Serialize to 32 bytes.
+    pub fn serialize(&self) -> [u8; 32] {
+        return self.bytes;
+    }
+
+    /// Derive the corresponding public key.
+    pub fn public_key(&self) -> Result<PublicKey, SecpError> {
+        let pk_bytes = crypto::secp256k1_pubkey_from_secret(self.bytes);
+        return PublicKey::from_bytes(pk_bytes);
+    }
+
+    /// Add a tweak (32 bytes) to this secret key in place (S* = S + tweak mod n).
+    pub fn add_tweak(&mut self, tweak: [u8; 32]) -> Result<(), SecpError> {
+        let result = crypto::secp256k1_secret_add(self.bytes, tweak);
+        self.bytes = result;
+        return Result::Ok(());
+    }
+
+    /// Multiply this secret key by a tweak in place (S* = S * tweak mod n).
+    pub fn mul_tweak(&mut self, tweak: [u8; 32]) -> Result<(), SecpError> {
+        let result = crypto::secp256k1_secret_mul(self.bytes, tweak);
+        self.bytes = result;
+        return Result::Ok(());
+    }
+}
+
+/// An ECDSA signature (usually 70-72 bytes DER-encoded, or 64 bytes compact).
+pub struct Signature {
+    bytes: [u8; 72],
+    len: usize,
+}
+
+impl Signature {
+    /// Create a Signature from DER-encoded bytes.
+    pub fn from_der(bytes: &[u8]) -> Result<Signature, SecpError> {
+        if bytes.len() < 8 || bytes.len() > 72 {
+            return Result::Err(SecpError::InvalidSignature);
+        }
+        if bytes[0] != 0x30 {
+            return Result::Err(SecpError::InvalidSignature);
+        }
+        let mut sig = Signature { bytes: [0u8; 72], len: bytes.len() };
+        let mut i: usize = 0;
+        while i < bytes.len() {
+            sig.bytes[i] = bytes[i];
+            i += 1;
+        }
+        return Result::Ok(sig);
+    }
+
+    /// Create a Signature from compact 64-byte format (R || S).
+    pub fn from_compact(bytes: &[u8]) -> Result<Signature, SecpError> {
+        if bytes.len() < 64 {
+            return Result::Err(SecpError::InvalidSignature);
+        }
+        // Convert compact to DER
+        let der = crypto::secp256k1_compact_to_der(bytes[0..64]);
+        return Signature::from_der(der);
+    }
+
+    /// Serialize to DER format.
+    pub fn serialize_der(&self) -> &[u8] {
+        return self.bytes[0..self.len];
+    }
+
+    /// Serialize to compact 64-byte format (R || S).
+    pub fn serialize_compact(&self) -> Result<[u8; 64], SecpError> {
+        return Result::Ok(crypto::secp256k1_der_to_compact(self.bytes[0..self.len]));
+    }
+}
+
+/// A 32-byte message hash to be signed.
+pub struct Message {
+    bytes: [u8; 32],
+}
+
+impl Message {
+    /// Create a Message from 32 raw bytes (the hash to sign).
+    pub fn from_bytes(bytes: [u8; 32]) -> Message {
+        return Message { bytes: bytes };
+    }
+
+    /// Create a Message by hashing data with SHA-256.
+    pub fn from_sha256(data: &[u8]) -> Message {
+        let hash = crypto::sha256(data);
+        return Message { bytes: hash };
+    }
+
+    /// Create a Message by double-SHA-256 hashing data.
+    pub fn from_double_sha256(data: &[u8]) -> Message {
+        let hash = crypto::sha256(data);
+        let double = crypto::sha256(hash);
+        return Message { bytes: double };
+    }
+
+    /// Serialize to 32 bytes.
+    pub fn serialize(&self) -> [u8; 32] {
+        return self.bytes;
+    }
+}
+
+// ─── Error Types ───────────────────────────────────────────────────────────
+
+/// Errors that can occur during secp256k1 operations.
+pub enum SecpError {
+    /// The public key bytes are invalid.
+    InvalidPublicKey,
+    /// The secret key bytes are invalid (zero or >= curve order).
+    InvalidSecretKey,
+    /// The signature bytes are invalid.
+    InvalidSignature,
+    /// The message is invalid.
+    InvalidMessage,
+    /// An internal cryptographic error occurred.
+    InternalError(string),
+}
+
+// ─── Secp256k1 Context ─────────────────────────────────────────────────────
+
+/// Secp256k1 signing and verification context.
+///
+/// Provides ECDSA operations on the secp256k1 curve, the standard curve
+/// used by Bitcoin, BSV, and related blockchain systems.
+///
+/// # Example
+/// ```zeta
+/// const secp = @import("@crypto/secp256k1");
+///
+/// const ctx = secp.Secp256k1::new();
+/// const (sk, pk) = ctx.generate_keypair();
+/// const msg = secp.Message::from_bytes([0xabu8; 32]);
+/// const sig = try ctx.sign(&msg, &sk);
+/// const valid = try ctx.verify(&msg, &sig, &pk);
+/// ```
+pub struct Secp256k1 {
+
+}
+
+impl Secp256k1 {
+
+    /// Create a new secp256k1 context.
+    ///
+    /// The context is stateless and thread-safe. All cryptographic state
+    /// is encapsulated in the runtime layer.
+    pub fn new() -> Secp256k1 {
+        return Secp256k1 {};
+    }
+
+    /// Generate a new random keypair.
+    ///
+    /// Uses the system's cryptographically secure random number generator
+    /// to produce a secret key, then derives the corresponding public key.
+    ///
+    /// # Returns
+    /// A tuple of (SecretKey, PublicKey).
+    pub fn generate_keypair(&self) -> (SecretKey, PublicKey) {
+        // Generate 32 random bytes
+        let mut sk_bytes: [u8; 32];
+        crypto::random_bytes(sk_bytes);
+
+        // Ensure it's a valid scalar (retry if not)
+        while !crypto::secp256k1_scalar_valid(sk_bytes) {
+            crypto::random_bytes(sk_bytes);
+        }
+
+        let sk = SecretKey { bytes: sk_bytes };
+        let pk_bytes = crypto::secp256k1_pubkey_from_secret(sk_bytes);
+        let pk = PublicKey { bytes: pk_bytes };
+        return (sk, pk);
+    }
+
+    /// Create an ECDSA signature over the given message with the given secret key.
+    ///
+    /// # Arguments
+    /// * `msg` - The 32-byte message hash to sign
+    /// * `sk` - The secret key to sign with
+    ///
+    /// # Returns
+    /// * `Ok(Signature)` - The DER-encoded ECDSA signature
+    /// * `Err(SecpError)` - Signing failed
+    pub fn sign(&self, msg: &Message, sk: &SecretKey) -> Result<Signature, SecpError> {
+        let der = crypto::secp256k1_sign(msg.bytes, sk.bytes);
+        if der.len() == 0 {
+            return Result::Err(SecpError::InternalError("signing failed"));
+        }
+        return Signature::from_der(der);
+    }
+
+    /// Verify an ECDSA signature against a message and public key.
+    ///
+    /// # Arguments
+    /// * `msg` - The 32-byte message hash that was signed
+    /// * `sig` - The ECDSA signature to verify
+    /// * `pk` - The public key that should have created the signature
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Signature is valid
+    /// * `Ok(false)` - Signature is invalid (wrong key or tampered)
+    /// * `Err(SecpError)` - Verification could not be performed
+    pub fn verify(&self, msg: &Message, sig: &Signature, pk: &PublicKey) -> Result<bool, SecpError> {
+        let result = crypto::secp256k1_verify(
+            msg.bytes,
+            sig.bytes[0..sig.len],
+            pk.bytes,
+        );
+        return Result::Ok(result);
+    }
+
+    /// Recover a public key from a signature and message (ECDSA recovery).
+    ///
+    /// # Arguments
+    /// * `msg` - The 32-byte message hash
+    /// * `sig` - The ECDSA signature (must include recovery id)
+    ///
+    /// # Returns
+    /// * `Ok(PublicKey)` - The recovered public key
+    /// * `Err(SecpError)` - Recovery failed
+    pub fn recover(&self, msg: &Message, sig: &Signature) -> Result<PublicKey, SecpError> {
+        let pk_bytes = crypto::secp256k1_recover(msg.bytes, sig.bytes[0..sig.len]);
+        if pk_bytes[0] != 0x02 && pk_bytes[0] != 0x03 {
+            return Result::Err(SecpError::InvalidPublicKey);
+        }
+        return Result::Ok(PublicKey { bytes: pk_bytes });
+    }
+
+    /// Aggregate multiple public keys (for MuSig / multi-signature schemes).
+    ///
+    /// # Arguments
+    /// * `pks` - A list of public keys to aggregate
+    ///
+    /// # Returns
+    /// * `Ok(PublicKey)` - The aggregated public key
+    /// * `Err(SecpError)` - Aggregation failed
+    pub fn aggregate_pubkeys(&self, pks: &[PublicKey]) -> Result<PublicKey, SecpError> {
+        if pks.len() == 0 {
+            return Result::Err(SecpError::InvalidPublicKey);
+        }
+        if pks.len() == 1 {
+            return Result::Ok(pks[0]);
+        }
+        let pk_bytes = crypto::secp256k1_aggregate_pubkeys(pks);
+        return Result::Ok(PublicKey { bytes: pk_bytes });
+    }
+}
+
+// ─── Free Functions ────────────────────────────────────────────────────────
+
+/// Verify that 32 bytes form a valid secp256k1 scalar (1..n-1).
+pub fn is_valid_scalar(bytes: [u8; 32]) -> bool {
+    return crypto::secp256k1_scalar_valid(bytes);
+}
+
+/// Verify that 33 bytes form a valid compressed public key.
+pub fn is_valid_pubkey(bytes: [u8; 33]) -> bool {
+    return crypto::secp256k1_pubkey_valid(bytes);
+}
+
+/// Compute the 32-byte X coordinate only (for hashing).
+pub fn pubkey_x_only(pk: &PublicKey) -> [u8; 32] {
+    return pk.x_coord();
+}
+
+/// Negate a secret key in the scalar field (sk' = n - sk).
+pub fn negate_secret(sk: &SecretKey) -> SecretKey {
+    let neg = crypto::secp256k1_scalar_negate(sk.bytes);
+    return SecretKey { bytes: neg };
+}
+
+/// Compute the tweaked public key for a given public key and tweak (BIP32).
+pub fn tweak_pubkey(pk: &PublicKey, tweak: [u8; 32]) -> Result<PublicKey, SecpError> {
+    let result = crypto::secp256k1_pubkey_tweak_add(pk.bytes, tweak);
+    return PublicKey::from_bytes(result);
+}
